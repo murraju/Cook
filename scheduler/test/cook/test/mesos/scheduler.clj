@@ -1058,16 +1058,20 @@
         (let [task-id (str (UUID/randomUUID))]
           (let [progress-aggregator-promise (promise)
                 handle-progress-message (handle-progress-message-factory progress-aggregator-promise)
+                handle-exit-code (constantly true)
+                handlers {:handle-exit-code handle-exit-code :handle-progress-message handle-progress-message}
                 message (make-message {:dummy-data task-id})]
-            (is (nil? (sched/handle-framework-message conn handle-progress-message message)))
+            (is (nil? (sched/handle-framework-message conn handlers message)))
             (is (nil? (deref progress-aggregator-promise 1000 nil))))))
 
       (testing "no transactions"
         (let [task-id (str (UUID/randomUUID))]
           (let [progress-aggregator-promise (promise)
                 handle-progress-message (handle-progress-message-factory progress-aggregator-promise)
+                handle-exit-code (constantly true)
+                handlers {:handle-exit-code handle-exit-code :handle-progress-message handle-progress-message}
                 message (make-message {:task-id task-id})]
-            (is (nil? (sched/handle-framework-message conn handle-progress-message message)))
+            (is (nil? (sched/handle-framework-message conn handlers message)))
             (is (nil? (deref progress-aggregator-promise 1000 nil))))))
 
       (testing "progress-message update"
@@ -1076,10 +1080,12 @@
               instance-id (create-dummy-instance conn job-id :instance-status :instance.status/running :task-id task-id)]
           (let [progress-aggregator-promise (promise)
                 handle-progress-message (handle-progress-message-factory progress-aggregator-promise)
+                handle-exit-code (constantly true)
+                handlers {:handle-exit-code handle-exit-code :handle-progress-message handle-progress-message}
                 progress-message "Almost complete..."
                 message (make-message {:task-id task-id :progress-message progress-message})]
             ;; no asynchronous transaction should be created
-            (is (nil? (sched/handle-framework-message conn handle-progress-message message)))
+            (is (nil? (sched/handle-framework-message conn handlers message)))
             (is (nil? (query-instance-field instance-id :instance/progress-message)))
             (is (= {:instance-id instance-id :progress-message progress-message :progress-percent nil :progress-sequence nil}
                    (deref progress-aggregator-promise 1000 nil))))))
@@ -1091,11 +1097,13 @@
 
           (let [progress-aggregator-promise (promise)
                 handle-progress-message (handle-progress-message-factory progress-aggregator-promise)
+                handle-exit-code (constantly true)
+                handlers {:handle-exit-code handle-exit-code :handle-progress-message handle-progress-message}
                 progress-percent 20
                 progress-sequence 11
                 message (make-message {:task-id task-id :progress-percent progress-percent :progress-sequence progress-sequence})]
             ;; no asynchronous transaction should be created
-            (is (nil? (sched/handle-framework-message conn handle-progress-message message)))
+            (is (nil? (sched/handle-framework-message conn handlers message)))
             (is (= 0 (query-instance-field instance-id :instance/progress)))
             (is (nil? (query-instance-field instance-id :instance/progress-message)))
             (is (= {:instance-id instance-id
@@ -1106,11 +1114,13 @@
 
           (let [progress-aggregator-promise (promise)
                 handle-progress-message (handle-progress-message-factory progress-aggregator-promise)
+                handle-exit-code (constantly true)
+                handlers {:handle-exit-code handle-exit-code :handle-progress-message handle-progress-message}
                 progress-percent 50
                 progress-sequence 19
                 message (make-message {:task-id task-id :progress-percent progress-percent :progress-sequence progress-sequence})]
             ;; no asynchronous transaction should be created
-            (is (nil? (sched/handle-framework-message conn handle-progress-message message)))
+            (is (nil? (sched/handle-framework-message conn handlers message)))
             (is (= 0 (query-instance-field instance-id :instance/progress)))
             (is (nil? (query-instance-field instance-id :instance/progress-message)))
             (is (= {:instance-id instance-id
@@ -1125,9 +1135,12 @@
               instance-id (create-dummy-instance conn job-id :instance-status :instance.status/running :task-id task-id)]
           (let [progress-aggregator-promise (promise)
                 handle-progress-message (handle-progress-message-factory progress-aggregator-promise)
+                handle-exit-code (fn [task-id exit-code]
+                                   @(d/transact conn [[:db/add [:instance/task-id task-id] :instance/exit-code exit-code]]))
+                handlers {:handle-exit-code handle-exit-code :handle-progress-message handle-progress-message}
                 exit-code 0
                 message (make-message {:task-id task-id :exit-code exit-code})]
-            (async/<!! (sched/handle-framework-message conn handle-progress-message message))
+            (sched/handle-framework-message conn handlers message)
             (is (= exit-code (query-instance-field instance-id :instance/exit-code)))
             (is (nil? (deref progress-aggregator-promise 1000 nil))))))
 
@@ -1137,6 +1150,9 @@
               instance-id (create-dummy-instance conn job-id :instance-status :instance.status/running :task-id task-id)]
           (let [progress-aggregator-promise (promise)
                 handle-progress-message (handle-progress-message-factory progress-aggregator-promise)
+                handle-exit-code (fn [task-id exit-code]
+                                   @(d/transact conn [[:db/add [:instance/task-id task-id] :instance/exit-code exit-code]]))
+                handlers {:handle-exit-code handle-exit-code :handle-progress-message handle-progress-message}
                 exit-code 0
                 progress-percent 90
                 progress-message "Almost complete..."
@@ -1146,7 +1162,7 @@
                                        :progress-message progress-message
                                        :progress-percent progress-percent
                                        :sandbox-directory sandbox-directory})]
-            (async/<!! (sched/handle-framework-message conn handle-progress-message message))
+            (sched/handle-framework-message conn handlers message)
             (is (= exit-code (query-instance-field instance-id :instance/exit-code)))
             (is (nil? (query-instance-field instance-id :instance/sandbox-directory)))
             (is (= 0 (query-instance-field instance-id :instance/progress)))
@@ -1786,7 +1802,7 @@
                                                   (-> status mtypes/pb->data :state)))))
                     (Thread/sleep (rand-int 100))
                     (.countDown latch))]
-      (let [s (sched/create-mesos-scheduler nil true nil nil nil nil nil nil nil)]
+      (let [s (sched/create-mesos-scheduler nil true nil nil nil nil nil nil nil nil)]
 
         (.statusUpdate s nil (mtypes/->pb :TaskStatus {:task-id {} :state :task-starting}))
         (.statusUpdate s nil (mtypes/->pb :TaskStatus {:task-id {:value "T1"} :state :task-starting}))
@@ -1818,7 +1834,7 @@
                                            (swap! sandbox-store conj framework-message))
                   sched/handle-framework-message (fn [_ _ framework-message]
                                                    (swap! framework-message-store conj framework-message))]
-      (let [s (sched/create-mesos-scheduler nil true nil nil nil nil nil nil nil)
+      (let [s (sched/create-mesos-scheduler nil true nil nil nil nil nil nil nil nil)
             make-message (fn [message] (-> message json/write-str str (.getBytes "UTF-8")))]
 
         (testing "message delegation"
@@ -1854,7 +1870,7 @@
                       (swap! messages-store update (str task-id) (fn [messages] (conj (or messages []) message))))
                     (Thread/sleep (rand-int 100))
                     (.countDown latch))]
-      (let [s (sched/create-mesos-scheduler nil true nil nil nil nil nil nil nil)
+      (let [s (sched/create-mesos-scheduler nil true nil nil nil nil nil nil nil nil)
             foo 11
             bar 21
             fee 31

@@ -315,7 +315,7 @@
 
 (defn handle-framework-message
   "Processes a framework message from Mesos."
-  [conn handle-progress-message
+  [conn {:keys [handle-exit-code handle-progress-message]}
    {:strs [exit-code progress-message progress-percent progress-sequence task-id] :as message}]
   (log/info "Received framework message:" {:task-id task-id, :message message})
   (timers/time!
@@ -335,7 +335,7 @@
                                         :progress-sequence progress-sequence}))
             (when exit-code
               (log/info "Updating instance" instance-id "exit-code to" exit-code)
-              (datomic/transact-with-retries conn [[:db/add instance-id :instance/exit-code (int exit-code)]])))))
+              (handle-exit-code task-id exit-code)))))
       (catch Exception e
         (log/error e "Mesos scheduler framework message error")))))
 
@@ -1423,9 +1423,11 @@
 
 (defn create-mesos-scheduler
   "Creates the mesos scheduler which processes status updates asynchronously but in order of receipt."
-  [configured-framework-id gpu-enabled? conn heartbeat-ch fenzo offers-chan match-trigger-chan handle-progress-message
-   sandbox-syncer-state]
-  (let [sync-agent-sandboxes-fn #(sandbox/sync-agent-sandboxes sandbox-syncer-state configured-framework-id %1 %2)]
+  [configured-framework-id gpu-enabled? conn heartbeat-ch fenzo offers-chan match-trigger-chan
+   handle-exit-code handle-progress-message sandbox-syncer-state]
+  (let [sync-agent-sandboxes-fn #(sandbox/sync-agent-sandboxes sandbox-syncer-state configured-framework-id %1 %2)
+        message-handlers {:handle-exit-code handle-exit-code
+                          :handle-progress-message handle-progress-message}]
     (mesos/scheduler
       (registered
         [this driver framework-id master-info]
@@ -1472,7 +1474,7 @@
               "directory" (sandbox/update-sandbox sandbox-syncer-state parsed-message)
               "heartbeat" (heartbeat/notify-heartbeat heartbeat-ch executor-id slave-id parsed-message)
               (async-in-order-processing
-                task-id #(handle-framework-message conn handle-progress-message parsed-message))))
+                task-id #(handle-framework-message conn message-handlers parsed-message))))
           (catch Exception e
             (log/error e "Unable to process framework message"
                        {:executor-id executor-id, :message message, :slave-id slave-id}))))
@@ -1497,7 +1499,7 @@
             task-id #(handle-status-update conn driver fenzo sync-agent-sandboxes-fn status)))))))
 
 (defn create-datomic-scheduler
-  [{:keys [conn driver-atom fenzo-fitness-calculator fenzo-floor-iterations-before-reset
+  [{:keys [conn driver-atom exit-code-syncer-state fenzo-fitness-calculator fenzo-floor-iterations-before-reset
            fenzo-floor-iterations-before-warn fenzo-max-jobs-considered fenzo-scaleback framework-id good-enough-fitness
            gpu-enabled? heartbeat-ch mea-culpa-failure-limit mesos-run-as-user agent-attributes-cache offer-incubate-time-ms
            pending-jobs-atom progress-config rebalancer-reservation-atom sandbox-syncer-state task-constraints
@@ -1516,8 +1518,11 @@
         {:keys [progress-state-chan]} (progress/progress-update-transactor progress-updater-trigger-chan batch-size conn)
         progress-aggregator-chan (progress/progress-update-aggregator progress-config progress-state-chan)
         handle-progress-message (fn handle-progress-message-curried [progress-message-map]
-                                  (progress/handle-progress-message! progress-aggregator-chan progress-message-map))]
+                                  (progress/handle-progress-message! progress-aggregator-chan progress-message-map))
+        handle-exit-code (fn handle-exit-code [task-id exit-code]
+                           (sandbox/aggregate-exit-code exit-code-syncer-state task-id exit-code))]
     (start-jobs-prioritizer! conn pending-jobs-atom task-constraints rank-trigger-chan)
     {:scheduler (create-mesos-scheduler framework-id gpu-enabled? conn heartbeat-ch fenzo offers-chan
-                                        match-trigger-chan handle-progress-message sandbox-syncer-state)
+                                        match-trigger-chan handle-exit-code handle-progress-message
+                                        sandbox-syncer-state)
      :view-incubating-offers (fn get-resources-atom [] @resources-atom)}))
